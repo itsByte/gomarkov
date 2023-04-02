@@ -1,20 +1,32 @@
 package gomarkov
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
-//Pair is a pair of consecutive states in a sequece
+// Pair is a pair of consecutive states in a sequece
 type Pair struct {
 	CurrentState NGram  // n = order of the chain
 	NextState    string // n = 1
 }
 
-//NGram is a array of words
+// NGram is a array of words
 type NGram []string
 
 type sparseArray map[int]int
 
 func (ngram NGram) key() string {
 	return strings.Join(ngram, "_")
+}
+
+func (s sparseArray) orderedKeys() []int {
+	keys := make([]int, 0, len(s))
+	for k := range s {
+		keys = append(keys, k)
+	}
+	sort.Ints(keys)
+	return keys
 }
 
 func (s sparseArray) sum() int {
@@ -40,7 +52,7 @@ func array(value string, count int) []string {
 	return arr
 }
 
-//MakePairs generates n-gram pairs of consecutive states in a sequence
+// MakePairs generates n-gram pairs of consecutive states in a sequence
 func MakePairs(tokens []string, order int) []Pair {
 	var pairs []Pair
 	for i := 0; i < len(tokens)-order; i++ {

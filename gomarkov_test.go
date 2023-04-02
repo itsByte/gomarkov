@@ -1,6 +1,7 @@
 package gomarkov
 
 import (
+	"math/rand"
 	"reflect"
 	"testing"
 )
@@ -238,5 +239,34 @@ func TestChain_Generate(t *testing.T) {
 				t.Errorf("Chain.Generate() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestChain_GenerateDeterministic(t *testing.T) {
+	chain := NewChain(2)
+	chain.Add(NGram{"i", "like", "bees"})
+	chain.Add(NGram{"i", "like", "cake"})
+	chain.Add(NGram{"i", "like", "pizza"})
+	chain.Add(NGram{"i", "like", "tacos"})
+
+	pairs := map[int64]string{
+		0:    "cake",
+		1:    "bees",
+		10:   "cake",
+		100:  "pizza",
+		1000: "bees",
+	}
+	for seed, expected := range pairs {
+		for i := 0; i < 16; i++ {
+			prng := rand.New(rand.NewSource(seed))
+			got, err := chain.GenerateDeterministic(NGram{"i", "like"}, prng)
+			if err != nil {
+				panic(err) // you wrote a bad test and should feel bad
+			}
+			if got != expected {
+				t.Errorf("Chain.GenerateDeterministic() is not deterministic; seed = %d, got = %q, want %q", seed, got, expected)
+				break
+			}
+		}
 	}
 }
