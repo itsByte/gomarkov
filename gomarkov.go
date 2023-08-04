@@ -152,7 +152,7 @@ func (chain *Chain) GenerateDeterministic(current NGram, prng PRNG) (string, err
 	return "", nil
 }
 
-//GenerateAll generates whole chain of text from scratch.
+// GenerateAll generates whole chain of text from scratch.
 func (chain *Chain) GenerateAll() ([]string, error) {
 	generatedText := []string{}
 	current := make(NGram, 0)
