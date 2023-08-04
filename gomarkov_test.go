@@ -1,9 +1,13 @@
 package gomarkov
 
 import (
+	"encoding/json"
+	"io/ioutil"
 	"math/rand"
 	"reflect"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestChain_MarshalJSON(t *testing.T) {
@@ -267,6 +271,27 @@ func TestChain_GenerateDeterministic(t *testing.T) {
 				t.Errorf("Chain.GenerateDeterministic() is not deterministic; seed = %d, got = %q, want %q", seed, got, expected)
 				break
 			}
+		}
+	}
+}
+
+func BenchmarkChain_GenerateDeterministic(b *testing.B) {
+	data, err := ioutil.ReadFile("test_model.json")
+	require.NoError(b, err)
+	var chain Chain
+	require.NoError(b, json.Unmarshal(data, &chain))
+	b.ResetTimer()
+	const seed = 100
+	for i := 0; i < b.N; i++ {
+		prng := rand.New(rand.NewSource(seed))
+		tokens := []string{StartToken}
+		for count := 0; count <= 100; count++ {
+			next, err := chain.GenerateDeterministic(tokens, prng)
+			require.NoError(b, err)
+			if next == EndToken {
+				next = StartToken
+			}
+			tokens = []string{next}
 		}
 	}
 }
