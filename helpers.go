@@ -55,12 +55,23 @@ func array(value string, count int) []string {
 // MakePairs generates n-gram pairs of consecutive states in a sequence
 func MakePairs(tokens []string, order int) []Pair {
 	var pairs []Pair
-	for i := 0; i < len(tokens)-order; i++ {
+	pair := Pair{
+		CurrentState: tokens[0:1],
+		NextState:    tokens[1],
+	}
+	pairs = append(pairs, pair)
+	for i := 1; i < len(tokens)-order-1; i++ {
 		pair := Pair{
 			CurrentState: tokens[i : i+order],
 			NextState:    tokens[i+order],
 		}
 		pairs = append(pairs, pair)
 	}
+	pair = Pair{
+		CurrentState: tokens[len(tokens)-2 : len(tokens)-1],
+		NextState:    tokens[len(tokens)-1],
+	}
+	pairs = append(pairs, pair)
+
 	return pairs
 }
