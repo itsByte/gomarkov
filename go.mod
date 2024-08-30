@@ -1,4 +1,4 @@
-module github.com/mb-14/gomarkov
+module github.com/itsByte/gomarkov
 
 go 1.21
 
