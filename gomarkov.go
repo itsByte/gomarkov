@@ -1,223 +1,173 @@
 package gomarkov
 
 import (
-	"encoding/json"
+	"encoding/binary"
 	"errors"
-	"fmt"
 	"math/rand"
-	"sync"
-	"time"
+
+	"github.com/cockroachdb/pebble/v2"
 )
 
-// Tokens are wrapped around a sequence of words to maintain the
-// start and end transition counts
 const (
-	StartToken = "^"
-	EndToken   = "$"
+	StartToken = "\u0002"
+	EndToken   = "\u0003"
 )
 
-type preprocessedArray struct {
-	sparseArray
-
-	sum         int
-	orderedKeys []int
-}
-
-// Chain is a markov chain instance
 type Chain struct {
-	Order        int
-	statePool    *spool
-	frequencyMat map[int]preprocessedArray
-	lock         *sync.RWMutex
+	Order   int
+	Storage *PebbleStorage
 }
 
-// PRNG is a pseudo-random number generator compatible with math/rand interfaces.
-type PRNG interface {
-	// Intn returns a number number in the half-open interval [0,n)
-	Intn(int) int
+func NewChain(order int, storage *PebbleStorage) *Chain {
+	return &Chain{Order: order, Storage: storage}
 }
 
-type chainJSON struct {
-	Order    int                 `json:"int"`
-	SpoolMap map[string]int      `json:"spool_map"`
-	FreqMat  map[int]sparseArray `json:"freq_mat"`
+func (c *Chain) Close() error {
+	return c.Storage.db.Close()
 }
 
-var defaultPrng = rand.New(rand.NewSource(time.Now().UnixNano()))
-
-// MarshalJSON ...
-func (chain Chain) MarshalJSON() ([]byte, error) {
-	frequencyMat := make(map[int]sparseArray, len(chain.frequencyMat))
-	for k, v := range chain.frequencyMat {
-		frequencyMat[k] = v.sparseArray
+// Add trains the primary order and all lower orders for Backoff support
+func (c *Chain) Add(cID int64, input []string) error {
+	tokens := make([]string, 0, len(input)+(c.Order*2))
+	for i := 0; i < c.Order; i++ {
+		tokens = append(tokens, StartToken)
 	}
-	obj := chainJSON{
-		chain.Order,
-		chain.statePool.stringMap,
-		frequencyMat,
+	tokens = append(tokens, input...)
+	for i := 0; i < c.Order; i++ {
+		tokens = append(tokens, EndToken)
 	}
-	return json.Marshal(obj)
-}
 
-// UnmarshalJSON ...
-func (chain *Chain) UnmarshalJSON(b []byte) error {
-	var obj chainJSON
-	err := json.Unmarshal(b, &obj)
+	ids := make([]uint32, len(tokens))
+	for i, word := range tokens {
+		id, _ := c.Storage.GetOrCreateID(word)
+		ids[i] = id
+	}
+
+	batch := c.Storage.db.NewBatch()
+	defer batch.Close()
+
+	for i := 0; i < len(ids)-c.Order; i++ {
+		nextID := ids[i+c.Order]
+		// Train Multi-Order: e.g. Order 2 trains [A,B]->C AND [B]->C
+		for o := c.Order; o >= 1; o-- {
+			window := ids[i+c.Order-o : i+c.Order]
+			if err := c.Storage.addTransition(batch, cID, window, nextID); err != nil {
+				return err
+			}
+		}
+	}
+	err := batch.Commit(pebble.Sync)
 	if err != nil {
 		return err
 	}
-	chain.Order = obj.Order
-	intMap := make(map[int]string)
-	for k, v := range obj.SpoolMap {
-		intMap[v] = k
-	}
-	chain.statePool = &spool{
-		stringMap: obj.SpoolMap,
-		intMap:    intMap,
-	}
-	chain.frequencyMat = make(map[int]preprocessedArray, len(obj.FreqMat))
-	for k, v := range obj.FreqMat {
-		chain.frequencyMat[k] = preprocessedArray{
-			sparseArray: v,
-			sum:         v.sum(),
-			orderedKeys: v.orderedKeys(),
-		}
-	}
-	chain.lock = new(sync.RWMutex)
 	return nil
 }
 
-// NewChain creates an instance of Chain
-func NewChain(order int) *Chain {
-	chain := Chain{Order: order}
-	chain.statePool = &spool{
-		stringMap: make(map[string]int),
-		intMap:    make(map[int]string),
-	}
-	chain.frequencyMat = make(map[int]preprocessedArray)
-	chain.lock = new(sync.RWMutex)
-	return &chain
-}
+// generateNextID implements the Backoff logic internally
+func (c *Chain) generateNextID(cID int64, currentIDs []uint32) (uint32, error) {
+	// Try the highest order, then back off to Order 1
+	for len(currentIDs) > 0 {
+		sumKey := c.Storage.buildKey('s', cID, currentIDs, nil)
+		if val, closer, err := c.Storage.db.Get(sumKey); err == nil {
+			totalWeight := binary.BigEndian.Uint32(val)
+			closer.Close()
 
-// Add adds the transition counts to the chain for a given sequence of words
-func (chain *Chain) Add(input []string) {
-	startTokens := array(StartToken, chain.Order)
-	endTokens := array(EndToken, chain.Order)
-	tokens := make([]string, 0)
-	tokens = append(tokens, startTokens...)
-	tokens = append(tokens, input...)
-	tokens = append(tokens, endTokens...)
-	pairs := MakePairs(tokens, chain.Order)
-	for i := 0; i < len(pairs); i++ {
-		pair := pairs[i]
-		currentIndex := chain.statePool.add(pair.CurrentState.key())
-		nextIndex := chain.statePool.add(pair.NextState)
-		chain.lock.Lock()
-		pa, has := chain.frequencyMat[currentIndex]
-		if !has {
-			pa = preprocessedArray{
-				sparseArray: make(sparseArray),
+			target := rand.Intn(int(totalWeight))
+			iterPrefix := c.Storage.buildKey('t', cID, currentIDs, nil)
+			iter, _ := c.Storage.db.NewIter(&pebble.IterOptions{
+				LowerBound: iterPrefix,
+				UpperBound: upperBound(iterPrefix),
+			})
+			defer iter.Close()
+
+			for iter.First(); iter.Valid(); iter.Next() {
+				weight := binary.BigEndian.Uint32(iter.Value())
+				target -= int(weight)
+				if target < 0 {
+					return binary.BigEndian.Uint32(iter.Key()[len(iter.Key())-4:]), nil
+				}
 			}
 		}
-		pa.sparseArray[nextIndex]++
-		pa.sum++
-		if len(pa.orderedKeys) != len(pa.sparseArray) {
-			pa.orderedKeys = pa.sparseArray.orderedKeys()
-		}
-		chain.frequencyMat[currentIndex] = pa
-		chain.lock.Unlock()
+		currentIDs = currentIDs[1:] // Backoff step
 	}
+	return 0, errors.New("dead end")
 }
 
-// TransitionProbability returns the transition probability between two states
-func (chain *Chain) TransitionProbability(next string, current NGram) (float64, error) {
-	if len(current) != chain.Order {
-		return 0, errors.New("N-gram length does not match chain order")
-	}
-	currentIndex, currentExists := chain.statePool.get(current.key())
-	nextIndex, nextExists := chain.statePool.get(next)
-	if !currentExists || !nextExists {
-		return 0, nil
-	}
-	arr := chain.frequencyMat[currentIndex]
-	sum := float64(arr.sum)
-	freq := float64(arr.sparseArray[nextIndex])
-	return freq / sum, nil
-}
-
-// Generate generates new text based on an initial seed of words
-func (chain *Chain) Generate(current NGram) (string, error) {
-	return chain.GenerateDeterministic(current, defaultPrng)
-}
-
-// GenerateDeterministic generates new text deterministically, based on an initial seed of words and using a specified PRNG.
-// Use it for reproducibly pseudo-random results (i.e. pass the same PRNG and same state every time).
-func (chain *Chain) GenerateDeterministic(current NGram, prng PRNG) (string, error) {
-	if len(current) != chain.Order {
-		return "", errors.New("N-gram length does not match chain order")
-	}
-	if current[len(current)-1] == EndToken {
-		// Dont generate anything after the end token
-		return "", nil
-	}
-	currentIndex, currentExists := chain.statePool.get(current.key())
-	if !currentExists {
-		return "", fmt.Errorf("Unknown ngram %v", current)
-	}
-	arr := chain.frequencyMat[currentIndex]
-	randN := prng.Intn(arr.sum)
-	for _, key := range arr.orderedKeys {
-		freq := arr.sparseArray[key]
-		randN -= freq
-		if randN <= 0 {
-			return chain.statePool.intMap[key], nil
-		}
-	}
-	return "", nil
-}
-
-// GenerateAll generates whole chain of text from scratch.
-func (chain *Chain) GenerateAll() ([]string, error) {
-	generatedText := []string{}
-	current := make(NGram, 0)
-	for i := 0; i < chain.Order; i++ {
-		current = append(current, StartToken)
-	}
-
-	for {
-		next, err := chain.Generate(current)
+func (c *Chain) Generate(cID int64, current []string) (string, error) {
+	currentIDs := make([]uint32, len(current))
+	for i, word := range current {
+		id, err := c.Storage.GetWordID(word)
 		if err != nil {
-			return []string{}, err
+			return "", err
 		}
-		if next == EndToken {
+		currentIDs[i] = id
+	}
+
+	nextID, err := c.generateNextID(cID, currentIDs)
+	if err != nil {
+		return "", err
+	}
+	return c.Storage.GetWord(nextID)
+}
+
+func (c *Chain) GenerateAll(cID int64) ([]string, error) {
+	return c.GenerateAllLimited(cID, 10000) // Default safety limit
+}
+
+func (c *Chain) GenerateAllLimited(cID int64, maxLen int) ([]string, error) {
+	res := []string{}
+	startID, _ := c.Storage.GetOrCreateID(StartToken)
+	endID, _ := c.Storage.GetOrCreateID(EndToken)
+
+	window := make([]uint32, c.Order)
+	for i := range window {
+		window[i] = startID
+	}
+
+	for range maxLen {
+		nextID, err := c.generateNextID(cID, window)
+		if err != nil || nextID == endID {
 			break
 		}
 
-		current = append(current, next)[1:]
-		generatedText = append(generatedText, next)
+		word, _ := c.Storage.GetWord(nextID)
+		res = append(res, word)
+		window = append(window, nextID)[1:]
 	}
-	return generatedText, nil
+	return res, nil
 }
 
-// GenerateAll generates whole chain of text from scratch.
-func (chain *Chain) GenerateAllLimited(maxLength int) ([]string, error) {
-	generatedText := []string{}
-	current := make(NGram, 0)
-	for i := 0; i < chain.Order; i++ {
-		current = append(current, StartToken)
+func (c *Chain) TransitionProbability(cID int64, next string, current []string) (float64, error) {
+	nextID, err := c.Storage.GetWordID(next)
+	if err != nil {
+		return 0, err
+	}
+	if len(current) != c.Order {
+		return 0, errors.New("N-gram length different from chain order")
 	}
 
-	for i := 0; i < maxLength; i++ {
-		next, err := chain.Generate(current)
+	currentIDs := make([]uint32, len(current))
+	for i, word := range current {
+		id, err := c.Storage.GetWordID(word)
 		if err != nil {
-			return []string{}, err
+			return 0, err
 		}
-		if next == EndToken {
-			break
-		}
-
-		current = append(current, next)[1:]
-		generatedText = append(generatedText, next)
+		currentIDs[i] = id
 	}
-	return generatedText, nil
+
+	sumKey := c.Storage.buildKey('s', cID, currentIDs, nil)
+	if val, closer, err := c.Storage.db.Get(sumKey); err == nil {
+		totalWeight := binary.BigEndian.Uint32(val)
+		closer.Close()
+
+		nextKey := c.Storage.buildKey('t', cID, currentIDs, &nextID)
+		if val, closer, err := c.Storage.db.Get(nextKey); err == nil {
+			nextWeight := binary.BigEndian.Uint32(val)
+			closer.Close()
+
+			return float64(nextWeight) / float64(totalWeight), nil
+
+		}
+	}
+	return 0, nil
 }

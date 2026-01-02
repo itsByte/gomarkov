@@ -1,297 +1,90 @@
 package gomarkov
 
 import (
-	"encoding/json"
-	"io/ioutil"
-	"math/rand"
+	"os"
 	"reflect"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 )
 
-func TestChain_MarshalJSON(t *testing.T) {
-	tests := []struct {
-		name    string
-		order   int
-		data    [][]string
-		want    string
-		wantErr bool
-	}{
-		{"Empty chain", 2, [][]string{}, `{"int":2,"spool_map":{},"freq_mat":{}}`, false},
-		{"Empty chain, order 1", 1, [][]string{}, `{"int":1,"spool_map":{},"freq_mat":{}}`, false},
-		{"Trained once", 1, [][]string{{"Test"}}, `{"int":1,"spool_map":{"$":2,"Test":1,"^":0},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`, false},
-		{"Trained on more data", 1, [][]string{{"test", "data"}, {"test", "data"}, {"test", "node"}}, `{"int":1,"spool_map":{"$":3,"^":0,"data":2,"node":4,"test":1},"freq_mat":{"0":{"1":3},"1":{"2":2,"4":1},"2":{"3":2},"4":{"3":1}}}`, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			chain := NewChain(tt.order)
-			for _, data := range tt.data {
-				chain.Add(data)
-			}
-
-			got, err := chain.MarshalJSON()
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Chain.MarshalJSON() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if !reflect.DeepEqual(string(got), tt.want) {
-				t.Errorf("Chain.MarshalJSON() = %v, want %v", string(got), tt.want)
-			}
-		})
-	}
-}
-
-func TestChain_UnmarshalJSON(t *testing.T) {
-	tests := []struct {
-		name    string
-		args    []byte
-		wantErr bool
-	}{
-		{"Empty chain", []byte(`{"int":2,"spool_map":{},"freq_mat":{}}`), false},
-		{"More complex chain", []byte(`{"int":1,"spool_map":{"^":0,"$":3,"data":2,"node":4,"test":1},"freq_mat":{"0":{"1":3},"1":{"2":2,"4":1},"2":{"3":2},"4":{"3":1}}}`), false},
-		{"Invalid json", []byte(`{{"int":2,"spool_map":{},"freq_mat":{}}`), true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			chain := NewChain(1)
-
-			if err := chain.UnmarshalJSON(tt.args); (err != nil) != tt.wantErr {
-				t.Errorf("Chain.UnmarshalJSON() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestNewChain(t *testing.T) {
-	type args struct {
-		order int
-	}
-	tests := []struct {
-		name string
-		args args
-		want int
-	}{
-		{"Order 1", args{order: 1}, 1},
-		{"Order 2", args{order: 2}, 2},
-		{"Order 50", args{order: 50}, 50},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := NewChain(tt.args.order); got.Order != tt.want {
-				t.Errorf("NewChain() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 func TestChain_Add(t *testing.T) {
-	type args struct {
-		input []string
+	tempDir, err := os.MkdirTemp("", "gomarkov_test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name  string
-		chain *Chain
-		args  args
-	}{
-		// TODO: Add test cases.
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tt.chain.Add(tt.args.input)
-		})
-	}
-}
+	defer os.RemoveAll(tempDir)
 
-func TestChain_TransitionProbability(t *testing.T) {
-	type args struct {
-		next    string
-		current NGram
+	storage, err := NewPebbleStorage(tempDir)
+	if err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name    string
-		chain   []byte
-		args    args
-		want    float64
-		wantErr bool
-	}{
-		{
-			"Simple transition positive",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{next: "Test", current: NGram{"^"}},
-			1,
-			false,
-		},
-		{
-			"Simple transition negative",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{next: "Test", current: NGram{"Test"}},
-			0,
-			false,
-		},
-		{
-			"Unknown next Ngram",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{next: "Unknown", current: NGram{"Test"}},
-			0,
-			false,
-		},
-		{
-			"Unknown ncurent Ngram",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{next: "Test", current: NGram{"Unknown"}},
-			0,
-			false,
-		},
-		{
-			"Invalid Ngram",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{next: "Unknown", current: NGram{"Test", "data"}},
-			0,
-			true,
-		},
-		{
-			"More than 1 option",
-			[]byte(`{"int":1,"spool_map":{"^":0,"$":3,"data":2,"node":4,"test":1},"freq_mat":{"0":{"1":3},"1":{"2":2,"4":2},"2":{"3":2},"4":{"3":1}}}`),
-			args{next: "node", current: NGram{"test"}},
-			0.5,
-			false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			chain := NewChain(1)
-			chain.UnmarshalJSON(tt.chain)
+	defer storage.db.Close()
 
-			got, err := chain.TransitionProbability(tt.args.next, tt.args.current)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Chain.TransitionProbability() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("Chain.TransitionProbability() = %v, want %v", got, tt.want)
-			}
-		})
+	chain := NewChain(2, storage)
+	err = chain.Add(1, []string{"I", "like", "to", "eat", "cake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = chain.Add(1, []string{"I", "like", "to", "eat", "pizza"})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
 func TestChain_Generate(t *testing.T) {
-	type args struct {
-		current NGram
+	tempDir, err := os.MkdirTemp("", "gomarkov_test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	tests := []struct {
-		name    string
-		chain   []byte
-		args    args
-		want    string
-		wantErr bool
-	}{
-		{
-			"Start of simple chain",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{current: NGram{"^"}},
-			"Test",
-			false,
-		},
-		{
-			"End of simple chain",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{current: NGram{"Test"}},
-			"$",
-			false,
-		},
-		{
-			"Complex chain",
-			[]byte(`{"int":1,"spool_map":{"^":0,"$":3,"data":2,"node":4,"test":1},"freq_mat":{"0":{"1":3},"1":{"2":2,"4":0},"2":{"3":2},"4":{"3":1}}}`),
-			args{current: NGram{"test"}},
-			"data",
-			false,
-		},
-		{
-			"Invalid Ngram",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{current: NGram{"Invalid", "Ngram"}},
-			"",
-			true,
-		},
-		{
-			"Unknown Ngram",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{current: NGram{"Unknown"}},
-			"",
-			true,
-		},
-		{
-			"No next state",
-			[]byte(`{"int":1,"spool_map":{"^":0,"Test":1,"$":2},"freq_mat":{"0":{"1":1},"1":{"2":1}}}`),
-			args{current: NGram{"$"}},
-			"",
-			false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			chain := NewChain(1)
-			chain.UnmarshalJSON(tt.chain)
+	defer os.RemoveAll(tempDir)
 
-			got, err := chain.Generate(tt.args.current)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("Chain.Generate() error = %v, wantErr %v", err, tt.wantErr)
-				return
-			}
-			if got != tt.want {
-				t.Errorf("Chain.Generate() = %v, want %v", got, tt.want)
-			}
-		})
+	storage, err := NewPebbleStorage(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.db.Close()
+
+	chain := NewChain(2, storage)
+	err = chain.Add(1, []string{"I", "like", "to", "eat", "cake"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = chain.Add(1, []string{"I", "like", "to", "eat", "pizza"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	word, err := chain.Generate(1, []string{"I", "like"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if word != "to" {
+		t.Errorf("Expected 'to', got %s", word)
 	}
 }
 
-func TestChain_GenerateDeterministic(t *testing.T) {
-	chain := NewChain(2)
-	chain.Add(NGram{"i", "like", "bees"})
-	chain.Add(NGram{"i", "like", "cake"})
-	chain.Add(NGram{"i", "like", "pizza"})
-	chain.Add(NGram{"i", "like", "tacos"})
-
-	pairs := map[int64]string{
-		0:    "cake",
-		1:    "bees",
-		10:   "cake",
-		100:  "pizza",
-		1000: "bees",
+func TestChain_GenerateAll(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "gomarkov_test")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for seed, expected := range pairs {
-		for i := 0; i < 16; i++ {
-			prng := rand.New(rand.NewSource(seed))
-			got, err := chain.GenerateDeterministic(NGram{"i", "like"}, prng)
-			if err != nil {
-				panic(err) // you wrote a bad test and should feel bad
-			}
-			if got != expected {
-				t.Errorf("Chain.GenerateDeterministic() is not deterministic; seed = %d, got = %q, want %q", seed, got, expected)
-				break
-			}
-		}
-	}
-}
+	defer os.RemoveAll(tempDir)
 
-func BenchmarkChain_GenerateDeterministic(b *testing.B) {
-	data, err := ioutil.ReadFile("test_model.json")
-	require.NoError(b, err)
-	var chain Chain
-	require.NoError(b, json.Unmarshal(data, &chain))
-	b.ResetTimer()
-	const seed = 100
-	for i := 0; i < b.N; i++ {
-		prng := rand.New(rand.NewSource(seed))
-		tokens := []string{StartToken}
-		for count := 0; count <= 100; count++ {
-			next, err := chain.GenerateDeterministic(tokens, prng)
-			require.NoError(b, err)
-			if next == EndToken {
-				next = StartToken
-			}
-			tokens = []string{next}
-		}
+	storage, err := NewPebbleStorage(tempDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer storage.db.Close()
+
+	chain := NewChain(1, storage)
+	err = chain.Add(1, []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	words, err := chain.GenerateAll(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(words, []string{"a", "b", "c"}) {
+		t.Errorf("Expected [a b c], got %v", words)
 	}
 }

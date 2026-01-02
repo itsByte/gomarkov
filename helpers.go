@@ -1,55 +1,32 @@
 package gomarkov
 
 import (
-	"sort"
-	"strings"
+	"encoding/binary"
+	"io"
 )
 
 // Pair is a pair of consecutive states in a sequece
 type Pair struct {
-	CurrentState NGram  // n = order of the chain
-	NextState    string // n = 1
+	CurrentState []string // n = order of the chain
+	NextState    string   // n = 1
 }
 
-// NGram is a array of words
-type NGram []string
-
-type sparseArray map[int]int
-
-func (ngram NGram) key() string {
-	return strings.Join(ngram, "_")
+// Transition represents a transition from a set of current states to a next state
+type Transition struct {
+	CID        int64 // Context ID
+	CurrentIDs []uint32
+	NextID     uint32
+	Frequency  uint32
 }
 
-func (s sparseArray) orderedKeys() []int {
-	keys := make([]int, 0, len(s))
-	for k := range s {
-		keys = append(keys, k)
-	}
-	sort.Ints(keys)
-	return keys
-}
+type sumMerger struct{ sum uint32 }
 
-func (s sparseArray) sum() int {
-	sum := 0
-	for _, count := range s {
-		sum += count
-	}
-	return sum
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
-}
-
-func array(value string, count int) []string {
-	arr := make([]string, count)
-	for i := range arr {
-		arr[i] = value
-	}
-	return arr
+func (m *sumMerger) MergeNewer(v []byte) error { m.sum += binary.BigEndian.Uint32(v); return nil }
+func (m *sumMerger) MergeOlder(v []byte) error { m.sum += binary.BigEndian.Uint32(v); return nil }
+func (m *sumMerger) Finish(base bool) ([]byte, io.Closer, error) {
+	res := make([]byte, 4)
+	binary.BigEndian.PutUint32(res, m.sum)
+	return res, nil, nil
 }
 
 // MakePairs generates n-gram pairs of consecutive states in a sequence

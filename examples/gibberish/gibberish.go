@@ -2,13 +2,12 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"os"
 	"strings"
+	"sync"
 
 	"github.com/itsByte/gomarkov"
 	"github.com/montanaflynn/stats"
@@ -27,14 +26,24 @@ func main() {
 	username := flag.String("u", "", "Username to classify")
 	flag.Parse()
 	if *train {
-		model := buildModel()
-		saveModel(model)
+		chain, err := buildChain()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		defer chain.Close()
 	} else {
 		if len(*username) == 0 {
 			flag.Usage()
 			return
 		}
-		model, err := loadModel()
+		chain, err := loadChain()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		defer chain.Close()
+		model, err := buildModel(chain)
 		if err != nil {
 			fmt.Println(err)
 			return
@@ -46,43 +55,38 @@ func main() {
 	}
 }
 
-func buildModel() model {
+func buildModel(chain *gomarkov.Chain) (model, error) {
 	var model model
-	chain := buildChain()
 	scores := getScores(chain)
 	model.StdDev, _ = stats.StandardDeviation(scores)
 	model.Mean, _ = stats.Mean(scores)
 	model.Chain = chain
-	return model
+	return model, nil
 }
 
-func saveModel(model model) {
-	jsonObj, _ := json.Marshal(model)
-	err := ioutil.WriteFile("model.json", jsonObj, 0644)
+func loadChain() (*gomarkov.Chain, error) {
+	storage, err := gomarkov.NewPebbleStorage("db")
 	if err != nil {
-		fmt.Println(err)
+		return nil, err
 	}
+	return gomarkov.NewChain(2, storage), nil
 }
 
-func loadModel() (model, error) {
-	data, err := ioutil.ReadFile("model.json")
+func buildChain() (*gomarkov.Chain, error) {
+	chain, err := loadChain()
 	if err != nil {
-		return model{}, err
+		return nil, err
 	}
-	var m model
-	err = json.Unmarshal(data, &m)
-	if err != nil {
-		return model{}, err
+	var wg sync.WaitGroup
+	for i, data := range getDataset("usernames.txt") {
+		wg.Add(1)
+		go func(i int, data string) {
+			defer wg.Done()
+			chain.Add(1, split(data))
+		}(i, data)
 	}
-	return m, nil
-}
-
-func buildChain() *gomarkov.Chain {
-	chain := gomarkov.NewChain(2)
-	for _, data := range getDataset("usernames.txt") {
-		chain.Add(split(data))
-	}
-	return chain
+	wg.Wait()
+	return chain, nil
 }
 
 func getScores(chain *gomarkov.Chain) []float64 {
@@ -113,7 +117,7 @@ func sequenceProbablity(chain *gomarkov.Chain, input string) float64 {
 	logProb := float64(0)
 	pairs := gomarkov.MakePairs(tokens, chain.Order)
 	for _, pair := range pairs {
-		prob, _ := chain.TransitionProbability(pair.NextState, pair.CurrentState)
+		prob, _ := chain.TransitionProbability(1, pair.NextState, pair.CurrentState)
 		if prob > 0 {
 			logProb += math.Log10(prob)
 		} else {

@@ -2,10 +2,8 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"strings"
 
@@ -17,24 +15,32 @@ func main() {
 	order := flag.Int("order", 3, "Chain order to use")
 	flag.Parse()
 	if *train {
-		chain := buildModel(*order)
-		saveModel(chain)
-	} else {
-		chain, err := loadModel()
+		chain, err := buildModel(*order)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
+		defer chain.Close()
+	} else {
+		chain, err := loadChain(*order)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		defer chain.Close()
 		generatePokemon(chain)
 	}
 }
 
-func buildModel(order int) *gomarkov.Chain {
-	chain := gomarkov.NewChain(order)
-	for _, data := range getDataset("names.txt") {
-		chain.Add(split(data))
+func buildModel(order int) (*gomarkov.Chain, error) {
+	chain, err := loadChain(order)
+	if err != nil {
+		return nil, err
 	}
-	return chain
+	for _, data := range getDataset("names.txt") {
+		chain.Add(1, split(data))
+	}
+	return chain, nil
 }
 
 func split(str string) []string {
@@ -42,7 +48,12 @@ func split(str string) []string {
 }
 
 func getDataset(fileName string) []string {
-	file, _ := os.Open(fileName)
+	file, err := os.Open(fileName)
+	if err != nil {
+		fmt.Println(err)
+		return nil
+	}
+	defer file.Close()
 	scanner := bufio.NewScanner(file)
 	var list []string
 	for scanner.Scan() {
@@ -51,35 +62,22 @@ func getDataset(fileName string) []string {
 	return list
 }
 
-func loadModel() (*gomarkov.Chain, error) {
-	var chain gomarkov.Chain
-	data, err := ioutil.ReadFile("model.json")
+func loadChain(order int) (*gomarkov.Chain, error) {
+	storage, err := gomarkov.NewPebbleStorage("db")
 	if err != nil {
-		return &chain, err
+		return nil, err
 	}
-	err = json.Unmarshal(data, &chain)
-	if err != nil {
-		return &chain, err
-	}
-	return &chain, nil
-}
-
-func saveModel(chain *gomarkov.Chain) {
-	jsonObj, _ := json.Marshal(chain)
-	err := ioutil.WriteFile("model.json", jsonObj, 0644)
-	if err != nil {
-		fmt.Println(err)
-	}
+	return gomarkov.NewChain(order, storage), nil
 }
 
 func generatePokemon(chain *gomarkov.Chain) {
 	order := chain.Order
 	tokens := make([]string, 0)
-	for i := 0; i < order; i++ {
+	for range order {
 		tokens = append(tokens, gomarkov.StartToken)
 	}
 	for tokens[len(tokens)-1] != gomarkov.EndToken {
-		next, _ := chain.Generate(tokens[(len(tokens) - order):])
+		next, _ := chain.Generate(1, tokens[(len(tokens)-order):])
 		tokens = append(tokens, next)
 	}
 	fmt.Println(strings.Join(tokens[order:len(tokens)-1], ""))

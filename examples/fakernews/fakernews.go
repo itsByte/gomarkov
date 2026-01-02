@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -31,15 +31,24 @@ func main() {
 			fmt.Println(err)
 			return
 		}
-		saveModel(chain)
+		defer chain.Close()
 	} else {
-		chain, err := loadModel()
+		chain, err := loadChain()
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
+		defer chain.Close()
 		generateHNStory(chain)
 	}
+}
+
+func loadChain() (*gomarkov.Chain, error) {
+	storage, err := gomarkov.NewPebbleStorage("db")
+	if err != nil {
+		return nil, err
+	}
+	return gomarkov.NewChain(3, storage), nil
 }
 
 func buildModel() (*gomarkov.Chain, error) {
@@ -47,7 +56,10 @@ func buildModel() (*gomarkov.Chain, error) {
 	if err != nil {
 		return nil, err
 	}
-	chain := gomarkov.NewChain(1)
+	chain, err := loadChain()
+	if err != nil {
+		return nil, err
+	}
 	var wg sync.WaitGroup
 	wg.Add(len(stories))
 	fmt.Println("Adding HN story titles to markov chain...")
@@ -59,24 +71,11 @@ func buildModel() (*gomarkov.Chain, error) {
 				fmt.Println(err)
 				return
 			}
-			chain.Add(strings.Split(story.Title, " "))
+			chain.Add(1, strings.Split(story.Title, " "))
 		}(storyID)
 	}
 	wg.Wait()
 	return chain, nil
-}
-
-func loadModel() (*gomarkov.Chain, error) {
-	var chain gomarkov.Chain
-	data, err := ioutil.ReadFile("model.json")
-	if err != nil {
-		return &chain, err
-	}
-	err = json.Unmarshal(data, &chain)
-	if err != nil {
-		return &chain, err
-	}
-	return &chain, nil
 }
 
 func fetchHNTopStories() ([]int, error) {
@@ -86,7 +85,7 @@ func fetchHNTopStories() ([]int, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +101,7 @@ func fetchHNStory(storyID int) (hnStory, error) {
 		return story, err
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return story, err
 	}
@@ -110,19 +109,11 @@ func fetchHNStory(storyID int) (hnStory, error) {
 	return story, err
 }
 
-func saveModel(chain *gomarkov.Chain) {
-	jsonObj, _ := json.Marshal(chain)
-	err := ioutil.WriteFile("model.json", jsonObj, 0644)
+func generateHNStory(chain *gomarkov.Chain) {
+	res, err := chain.GenerateAll(1)
 	if err != nil {
 		fmt.Println(err)
+		return
 	}
-}
-
-func generateHNStory(chain *gomarkov.Chain) {
-	tokens := []string{gomarkov.StartToken}
-	for tokens[len(tokens)-1] != gomarkov.EndToken {
-		next, _ := chain.Generate(tokens[(len(tokens) - 1):])
-		tokens = append(tokens, next)
-	}
-	fmt.Println(strings.Join(tokens[1:len(tokens)-1], " "))
+	fmt.Println(strings.Join(res, " "))
 }
