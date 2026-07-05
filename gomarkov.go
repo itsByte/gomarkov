@@ -171,3 +171,27 @@ func (c *Chain) TransitionProbability(cID int64, next string, current []string) 
 	}
 	return 0, nil
 }
+
+// ClearContext removes all learned transitions and sums for a context.
+func (c *Chain) ClearContext(cID int64) error {
+	return c.Storage.ClearContext(cID)
+}
+
+// ClearContextTokens removes transitions whose keys contain any of the given
+// tokens, then rebuilds the context's sum keys from the remaining data.
+// The rebuild mirrors the accumulation used during Add.
+func (c *Chain) ClearContextTokens(cID int64, tokens []string) error {
+	tokenIDs := make([]uint32, 0, len(tokens))
+	for _, tok := range tokens {
+		id, err := c.Storage.GetWordID(tok)
+		if err != nil {
+			// Token never learned; nothing to delete for it.
+			continue
+		}
+		tokenIDs = append(tokenIDs, id)
+	}
+	if len(tokenIDs) == 0 {
+		return nil
+	}
+	return c.Storage.ClearContextTokens(cID, tokenIDs)
+}

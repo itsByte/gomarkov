@@ -212,6 +212,110 @@ func (s *PebbleStorage) AddTransitions(transitions []Transition) error {
 	return batch.Commit(pebble.Sync)
 }
 
+// contextPrefixKey builds a 9-byte prefix [prefix][cID] for range scans.
+func (s *PebbleStorage) contextPrefixKey(p byte, cID int64) []byte {
+	k := make([]byte, 9)
+	k[0] = p
+	binary.BigEndian.PutUint64(k[1:9], uint64(cID))
+	return k
+}
+
+// ClearContext deletes all transitions and sums for a context.
+func (s *PebbleStorage) ClearContext(cID int64) error {
+	batch := s.db.NewBatch()
+	defer batch.Close()
+
+	for _, p := range []byte{prefixTransition, prefixSum} {
+		lower := s.contextPrefixKey(p, cID)
+		upper := upperBound(lower)
+		if err := batch.DeleteRange(lower, upper, pebble.NoSync); err != nil {
+			return err
+		}
+	}
+	return batch.Commit(pebble.Sync)
+}
+
+// ClearContextTokens deletes transitions whose key contains any of the given
+// token IDs, then rebuilds all sum keys for the context from the remaining
+// transitions. The rebuild uses the same accumulation logic as addTransition.
+func (s *PebbleStorage) ClearContextTokens(cID int64, tokenIDs []uint32) error {
+	tLower := s.contextPrefixKey(prefixTransition, cID)
+	tUpper := upperBound(tLower)
+
+	iter, err := s.db.NewIter(&pebble.IterOptions{
+		LowerBound: tLower,
+		UpperBound: tUpper,
+	})
+	if err != nil {
+		return err
+	}
+	defer iter.Close()
+
+	tokenIDSet := make(map[uint32]struct{}, len(tokenIDs))
+	for _, id := range tokenIDs {
+		tokenIDSet[id] = struct{}{}
+	}
+
+	var toDelete [][]byte
+	sums := make(map[string]uint32)
+
+	for iter.First(); iter.Valid(); iter.Next() {
+		tKey := iter.Key()
+		weight := binary.BigEndian.Uint32(iter.Value())
+
+		matched := false
+		for i := 10; i+4 <= len(tKey); i += 4 {
+			if _, ok := tokenIDSet[binary.BigEndian.Uint32(tKey[i:i+4])]; ok {
+				matched = true
+				break
+			}
+		}
+
+		if matched {
+			keyCopy := make([]byte, len(tKey))
+			copy(keyCopy, tKey)
+			toDelete = append(toDelete, keyCopy)
+			continue
+		}
+
+		// Accumulate sum: s key = t key with prefix 's' and nextID stripped.
+		sKey := make([]byte, len(tKey)-4)
+		sKey[0] = prefixSum
+		copy(sKey[1:], tKey[1:len(tKey)-4])
+		sums[string(sKey)] += weight
+	}
+	if err := iter.Error(); err != nil {
+		return err
+	}
+
+	batch := s.db.NewBatch()
+	defer batch.Close()
+
+	// Delete matched transitions.
+	for _, k := range toDelete {
+		if err := batch.Delete(k, pebble.NoSync); err != nil {
+			return err
+		}
+	}
+
+	// Wipe and rebuild all sums for the context.
+	sLower := s.contextPrefixKey(prefixSum, cID)
+	sUpper := upperBound(sLower)
+	if err := batch.DeleteRange(sLower, sUpper, pebble.NoSync); err != nil {
+		return err
+	}
+
+	val := make([]byte, 4)
+	for sKeyStr, sum := range sums {
+		binary.BigEndian.PutUint32(val, sum)
+		if err := batch.Set([]byte(sKeyStr), val, pebble.NoSync); err != nil {
+			return err
+		}
+	}
+
+	return batch.Commit(pebble.Sync)
+}
+
 // Utility for Pebble prefix boundary
 func upperBound(prefix []byte) []byte {
 	res := make([]byte, len(prefix))
